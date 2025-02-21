@@ -329,27 +329,18 @@ def select_denoised_data(patient_data):
 ########################
 # with default settings
 # Function to create multi-scale windows
-def multi_scale_windowize(data, window_sizes, overlap_rate=None):
-    """
-    Create multi-scale windows for EEG data.
-    
-    Parameters:
-        data (list or np.array): Input EEG data.
-        window_sizes (list): List of window sizes (e.g., [100, 200, 300]).
-        overlap_rate (float): Overlap rate for windows (e.g., 0.5 for 50% overlap).
-    
-    Returns:
-        list: List of windowed data for each scale.
-    """
+def multi_scale_windowize(data, window_sizes, overlap_rates):
     multi_scale_windows = []
-    for size in window_sizes:
-        if overlap_rate is None:
-            windows = windowize_list(data, size)
-        else:
-            windows = windowize_list(data, size, overlap_rate)
-        multi_scale_windows.append(windows)
+    for size, overlap_rate in zip(window_sizes, overlap_rates):
+        print(f"Processing window size: {size}, Overlap rate: {overlap_rate}")
+        windows = []
+        for subject_data in data:
+            print(f"Subject data shape: {subject_data.shape}")
+            subject_windows = windowize_with_overlap(subject_data, size, overlap_rate)
+            print(f"Number of windows for this subject: {len(subject_windows)}")
+            windows.append(subject_windows)
+        multi_scale_windows.append(np.concatenate(windows, axis=0))
     return multi_scale_windows
-
 
 # Modify the `get_raw_data` function to use multi-scale windows
 def get_raw_data(raw_data_dir, resolution_hz, ignore_list, excluded_channels, window_sizes,
