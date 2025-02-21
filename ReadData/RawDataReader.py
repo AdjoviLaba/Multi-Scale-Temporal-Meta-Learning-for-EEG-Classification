@@ -102,26 +102,29 @@ def windowize(seq, size):
 #               a rate of .9 will set 90% overlap and will begin the second 
 #               segment at 10% of the length of the first segment. Ratios will
 #               be rounded up
-def windowize_with_overlap(seq, size, overlap_rate):
-    start_pos, end_pos = 0, size
-    slices = []
-    while end_pos <= len(seq):
-        window = np.asarray(seq[start_pos: end_pos])
-        start_pos = start_pos + size - math.ceil(overlap_rate * size)
-        end_pos = start_pos + size
-        slices.append(window)
-    slices = np.asarray(slices)
-    return slices
-
-
-def windowize_list(nested_list, size, overlap_rate=None):
-    wl = []
-    for d in nested_list:
-        df = pd.DataFrame(np.asarray(d))
-        w = windowize(df, size) if overlap_rate is None else windowize_with_overlap(df, size, overlap_rate)
-        for e in w:
-            wl.append(e)
-    return wl
+def multi_scale_windowize(seq, window_sizes, overlap_rates):
+    """
+    Apply multiple window sizes with different overlap rates to the input sequence.
+    
+    :param seq: Input EEG signal sequence.
+    :param window_sizes: List of window sizes to apply (in seconds).
+    :param overlap_rates: Corresponding list of overlap rates for each window size.
+    :return: List of segmented EEG data at different scales.
+    """
+    multi_scale_segments = []
+    
+    for size, overlap_rate in zip(window_sizes, overlap_rates):
+        start_pos, end_pos = 0, size
+        slices = []
+        while end_pos <= len(seq):
+            window = np.asarray(seq[start_pos:end_pos])
+            start_pos = start_pos + size - math.ceil(overlap_rate * size)
+            end_pos = start_pos + size
+            slices.append(window)
+        slices = np.asarray(slices)
+        multi_scale_segments.append(slices)
+    
+    return multi_scale_segments
 
 
 # add random noise using the mean and standard deviation of the original dataset
@@ -419,57 +422,61 @@ def get_raw_data(raw_data_dir, resolution_hz, ignore_list, excluded_channels, ti
     Y_test = np_utils.to_categorical(Y_test, num_classes=2)
 
     # Reshape the data
-    chans = len(all_channels) - len(excluded_channels)
-    X_train = X_train.reshape(X_train.shape[0], time_window, chans)
-    X_validate = X_validate.reshape(X_validate.shape[0], time_window, chans)
-    X_test = X_test.reshape(X_test.shape[0], time_window, chans)
-
-    # fit scaler on entire dataset; then transform each set separately
-    # from sklearn.preprocessing import MinMaxScaler
-    # scaler = MinMaxScaler(feature_range=[0, 1])
-
-    X_train = replace_outliers(X_train)
-    X_validate = replace_outliers(X_validate)
-    X_test = replace_outliers(X_test)
-
-    if remove_outliers: # set outliers to median values for each channel
-        ###########################
-		# Standardize dataset
-        dataset = X_train
-        dataset_shape0 = np.asarray(dataset).shape
-
-        # Estimate mean and standard deviation
-
-        # use the training data to fit the scaler, as suggested here https://stackoverflow.com/a/50567308
-        # flatten the features then reintroduce the 3rd dimension
-        dataset_flattened = flatten_features(dataset)
-        means = column_means(dataset_flattened)
-        stdevs = column_stdevs(dataset_flattened, means)
-
-        print('Removing outliers by channel')
-        X_train = standardize_dataset(flatten_features(X_train),means, stdevs)
-        X_train = X_train.reshape(x_train_shape)
-        X_validate = standardize_dataset(flatten_features(X_validate), means, stdevs)  # use means and stdevs from training
-        X_validate = X_validate.reshape(x_validate_shape)
-        X_test = standardize_dataset(flatten_features(X_test), means, stdevs)
-        X_test = X_test.reshape(x_test_shape)
-
-    print('Selected indexes for control group: ')
-    print('Training: ', hc_train_idxs)
-    print('Testing: ', hc_test_idxs)
-    print('Validation: ', hc_validate_idxs)
-
-    print('\nSelected indexes for patient group: ')
-    print('Training: ', sz_train_idxs)
-    print('Testing: ', sz_test_idxs)
-    print('Validation: ', sz_validate_idxs)
-    return {'hc_data': hc_data, 'sz_data': sz_data,
+    def get_raw_data_multiscale(raw_data_dir, resolution_hz, ignore_list, excluded_channels, window_sizes, overlap_rates,
+                            shuffle_train_test_sets=False, use_common_train_test_idxs=True, remove_outliers=True):
+        """
+        Load EEG data, apply multi-scale windowization, and handle preprocessing steps.
+        """
+        hc_data = process_patient_group('Healthy Controls', 'h', resolution_hz, raw_data_dir, ignore_list, excluded_channels)
+        sz_data = process_patient_group('SZ Patients', 's', resolution_hz, raw_data_dir, ignore_list, excluded_channels)
+        
+        def apply_multiscale_windowing(data):
+            multi_scale_data = []
+            for patient_data in data:
+                multi_windows = multi_scale_windowize(patient_data, window_sizes, overlap_rates)
+                stacked_windows = np.concatenate(multi_windows, axis=0)
+                multi_scale_data.append(stacked_windows)
+            return np.array(multi_scale_data)
+        
+        hc_data_multiscale = apply_multiscale_windowing(hc_data)
+        sz_data_multiscale = apply_multiscale_windowing(sz_data)
+        
+        # Train-test-validation split
+        hc_train_idxs, hc_validate_idxs, hc_test_idxs = get_mixed_indexes_for_ml_train_test(len(hc_data_multiscale), [.60, 0.2, 0.2])
+        sz_train_idxs, sz_validate_idxs, sz_test_idxs = get_mixed_indexes_for_ml_train_test(len(sz_data_multiscale), [.60, 0.2, 0.2])
+        
+        def split_data(data, train_idxs, validate_idxs, test_idxs):
+            return data[train_idxs], data[validate_idxs], data[test_idxs]
+        
+        hc_train, hc_validate, hc_test = split_data(hc_data_multiscale, hc_train_idxs, hc_validate_idxs, hc_test_idxs)
+        sz_train, sz_validate, sz_test = split_data(sz_data_multiscale, sz_train_idxs, sz_validate_idxs, sz_test_idxs)
+        
+        # Merge groups
+        X_train = np.concatenate((hc_train, sz_train), axis=0)
+        Y_train = ([0] * len(hc_train)) + ([1] * len(sz_train))
+        
+        X_validate = np.concatenate((hc_validate, sz_validate), axis=0)
+        Y_validate = ([0] * len(hc_validate)) + ([1] * len(sz_validate))
+        
+        X_test = np.concatenate((hc_test, sz_test), axis=0)
+        Y_test = ([0] * len(hc_test)) + ([1] * len(sz_test))
+        
+        if shuffle_train_test_sets:
+            X_train, Y_train = shuffle(X_train, Y_train)
+            X_validate, Y_validate = shuffle(X_validate, Y_validate)
+            X_test, Y_test = shuffle(X_test, Y_test)
+        
+        # Convert labels to one-hot encodings
+        Y_train = np_utils.to_categorical(Y_train, num_classes=2)
+        Y_validate = np_utils.to_categorical(Y_validate, num_classes=2)
+        Y_test = np_utils.to_categorical(Y_test, num_classes=2)
+        
+        return {
             'X_train': X_train, 'Y_train': Y_train,
             'X_validate': X_validate, 'Y_validate': Y_validate,
-            'X_test': X_test, 'Y_test': Y_test,
-            'minimum_duration': minimum_duration,
-            'maximum_duration': maximum_duration
-            }
+            'X_test': X_test, 'Y_test': Y_test
+    }
+
 
 
 def clean_example_participant_list(participant_list, ignore_list, group_symbol):
